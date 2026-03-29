@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>공사장 소음 모니터링</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "Noto Sans KR", "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+    header { background: #1e293b; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; border-bottom: 1px solid #334155; }
+    header h1 { font-size: 1.3rem; font-weight: 700; }
+    .badge { background: #22c55e; color: #fff; font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    main { padding: 1.5rem 2rem; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1rem 1.2rem; }
+    .card .label { font-size: 0.75rem; color: #94a3b8; margin-bottom: 4px; }
+    .card .value { font-size: 2rem; font-weight: 700; }
+    .card .unit  { font-size: 0.85rem; color: #94a3b8; }
+    .card.ok .value { color: #22c55e; } .card.warn .value { color: #f59e0b; } .card.alert .value { color: #ef4444; }
+    .chart-box { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1.2rem; margin-bottom: 1.5rem; }
+    .chart-box h2 { font-size: 0.95rem; color: #94a3b8; margin-bottom: 1rem; }
+    .chart-wrap { position: relative; height: 280px; }
+    .controls { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+    .controls label { font-size: 0.82rem; color: #94a3b8; }
+    .controls select, .controls button { background: #0f172a; color: #e2e8f0; border: 1px solid #475569; border-radius: 6px; padding: 4px 10px; font-size: 0.82rem; cursor: pointer; }
+    .controls button:hover { background: #1e3a5f; }
+    .table-box { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1.2rem; overflow-x: auto; }
+    .table-box h2 { font-size: 0.95rem; color: #94a3b8; margin-bottom: 1rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
+    th { text-align: left; color: #94a3b8; padding: 4px 8px; border-bottom: 1px solid #334155; }
+    td { padding: 5px 8px; border-bottom: 1px solid #1e293b; }
+    tr:hover td { background: #243347; }
+    .over { color: #ef4444; font-weight: 700; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>공사장 소음 모니터링</h1>
+  <span class="badge" id="badge">LIVE</span>
+  <span style="margin-left:auto; font-size:0.8rem; color:#64748b" id="last-update"></span>
+</header>
+<main>
+  <div class="cards" id="stat-cards">
+    <div class="card" id="card-avg"><div class="label">현재 평균 소음</div><div class="value" id="val-avg">--</div><div class="unit">dB</div></div>
+    <div class="card" id="card-max"><div class="label">최대 소음</div><div class="value" id="val-max">--</div><div class="unit">dB</div></div>
+    <div class="card"><div class="label">기준치 (주간)</div><div class="value ok">65</div><div class="unit">dB</div></div>
+    <div class="card"><div class="label">활성 노드</div><div class="value" id="val-nodes" style="color:#38bdf8">--</div><div class="unit">개</div></div>
+  </div>
+  <div class="chart-box">
+    <div class="controls">
+      <label>노드</label><select id="sel-node"></select>
+      <label>기간</label>
+      <select id="sel-hours">
+        <option value="1">최근 1시간</option>
+        <option value="3">최근 3시간</option>
+        <option value="6">최근 6시간</option>
+        <option value="24">최근 24시간</option>
+      </select>
+      <button onclick="fetchData()">새로고침</button>
+    </div>
+    <h2 id="chart-title">소음 이력</h2>
+    <div class="chart-wrap"><canvas id="noiseChart"></canvas></div>
+  </div>
+  <div class="table-box">
+    <h2>최근 수신 데이터</h2>
+    <table>
+      <thead><tr><th>시각</th><th>노드</th><th>평균 (dB)</th><th>최대 (dB)</th><th>최소 (dB)</th><th>RSSI</th><th>SEQ</th></tr></thead>
+      <tbody id="tbl-body"></tbody>
+    </table>
+  </div>
+</main>
+<script>
+const LIMIT_DAY = 65;
+const REFRESH_MS = 10000;
+let chart = null;
+
+function initChart() {
+  const ctx = document.getElementById("noiseChart").getContext("2d");
+  chart = new Chart(ctx, {
+    type: "line",
+    data: { labels: [], datasets: [
+      { label: "평균 dB", data: [], borderColor: "#38bdf8", backgroundColor: "rgba(56,189,248,0.08)", fill: true, tension: 0.3, pointRadius: 2 },
+      { label: "최대 dB", data: [], borderColor: "#fb923c", backgroundColor: "transparent", borderDash: [4,3], tension: 0.3, pointRadius: 1 }
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 300 },
+      plugins: { legend: { labels: { color: "#94a3b8", font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: "#64748b", maxTicksLimit: 10, maxRotation: 30 }, grid: { color: "#1e293b" } },
+        y: { ticks: { color: "#64748b", callback: v => v + " dB" }, grid: { color: "#334155" }, min: 30, max: 90 }
+      }
+    }
+  });
+}
+
+async function loadNodes() {
+  const res = await fetch("/api/v1/nodes").catch(() => null);
+  if (!res || !res.ok) return;
+  const nodes = await res.json();
+  const sel = document.getElementById("sel-node");
+  sel.innerHTML = '<option value="">전체</option>';
+  nodes.forEach(n => {
+    const opt = document.createElement("option");
+    opt.value = n.node_id;
+    opt.textContent = `Node-${n.node_id.toString(16).padStart(2,"0").toUpperCase()} (${n.location || "미등록"})`;
+    sel.appendChild(opt);
+  });
+  document.getElementById("val-nodes").textContent = nodes.length;
+}
+
+async function fetchData() {
+  const nodeId = document.getElementById("sel-node").value;
+  const hours  = document.getElementById("sel-hours").value;
+  let url = `/api/v1/noise?hours=${hours}&limit=300`;
+  if (nodeId) url += `&node_id=${nodeId}`;
+  const res = await fetch(url).catch(() => null);
+  if (!res || !res.ok) return;
+  const records = await res.json();
+  updateChart(records);
+  updateTable(records.slice(0, 30));
+  updateSummary(records);
+  document.getElementById("last-update").textContent = "업데이트: " + new Date().toLocaleTimeString("ko-KR");
+}
+
+function updateChart(records) {
+  const sorted = [...records].reverse();
+  chart.data.labels = sorted.map(r => new Date(r.received_at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }));
+  chart.data.datasets[0].data = sorted.map(r => r.db_avg);
+  chart.data.datasets[1].data = sorted.map(r => r.db_max);
+  chart.update();
+}
+
+function updateTable(records) {
+  const tbody = document.getElementById("tbl-body");
+  tbody.innerHTML = "";
+  records.forEach(r => {
+    const over = r.db_avg > LIMIT_DAY;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${new Date(r.received_at).toLocaleString("ko-KR")}</td><td>Node-${r.node_id.toString(16).padStart(2,"0").toUpperCase()}</td><td class="${over ? 'over' : ''}">${r.db_avg.toFixed(1)}</td><td>${r.db_max.toFixed(1)}</td><td>${r.db_min.toFixed(1)}</td><td>${r.rssi} dBm</td><td>${r.seq}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function updateSummary(records) {
+  if (!records.length) return;
+  const avg = records[0].db_avg;
+  const max = Math.max(...records.map(r => r.db_max));
+  const elAvg = document.getElementById("val-avg");
+  const elMax = document.getElementById("val-max");
+  elAvg.textContent = avg.toFixed(1);
+  elMax.textContent = max.toFixed(1);
+  function setStatus(card, val) {
+    card.className = "card";
+    if (val >= LIMIT_DAY + 10) card.classList.add("alert");
+    else if (val >= LIMIT_DAY)  card.classList.add("warn");
+    else                         card.classList.add("ok");
+  }
+  setStatus(document.getElementById("card-avg"), avg);
+  setStatus(document.getElementById("card-max"), max);
+}
+
+(async () => {
+  initChart();
+  await loadNodes();
+  await fetchData();
+  setInterval(fetchData, REFRESH_MS);
+})();
+</script>
+</body>
+</html>
